@@ -1,14 +1,37 @@
-"""Invoke the Advanced Fraud Detection Agent with Short-term and Long-term Memory on Bedrock AgentCore"""
+"""Invoke the Advanced Fraud Detection Agent with Memory and MCP Gateway on Bedrock AgentCore"""
 
 import boto3
 import json
 import sys
 import uuid
 import time
+import subprocess
 
 
-def invoke_agent(agent_runtime_arn: str, prompt: str, actor_id: str = None, session_id: str = None) -> dict:
-    """Invoke the agent with a given prompt, actor_id, and session_id."""
+def get_pulumi_outputs() -> dict:
+    """Get Pulumi stack outputs for Gateway configuration."""
+    try:
+        result = subprocess.run(
+            ["pulumi", "stack", "output", "--json", "--show-secrets"],
+            cwd="infra",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        print(f"[WARNING] Could not get Pulumi outputs: {e}")
+        return {}
+
+
+def invoke_agent(
+    agent_runtime_arn: str,
+    prompt: str,
+    actor_id: str = None,
+    session_id: str = None,
+    gateway_config: dict = None
+) -> dict:
+    """Invoke the agent with a given prompt, actor_id, session_id, and optional gateway config."""
     client = boto3.client("bedrock-agentcore", region_name="us-east-1")
 
     # Generate default IDs if not provided
@@ -17,13 +40,19 @@ def invoke_agent(agent_runtime_arn: str, prompt: str, actor_id: str = None, sess
     if not session_id:
         session_id = str(uuid.uuid4()).replace("-", "") + str(uuid.uuid4()).replace("-", "")[:10]
 
-    payload = json.dumps({
+    payload_data = {
         "input": {
             "prompt": prompt,
             "actor_id": actor_id,
             "session_id": session_id,
         }
-    })
+    }
+
+    # Add gateway config if provided
+    if gateway_config:
+        payload_data["input"]["gateway_config"] = gateway_config
+
+    payload = json.dumps(payload_data)
 
     response = client.invoke_agent_runtime(
         agentRuntimeArn=agent_runtime_arn,
@@ -50,6 +79,7 @@ def run_demo_scenario(agent_runtime_arn: str):
     print("=" * 70)
     print("This demo shows short-term memory within the SAME session.")
     print("For long-term memory demo, use: python invoke_agent.py <arn> longterm")
+    print("For MCP Gateway demo, use: python invoke_agent.py <arn> gateway")
     print("=" * 70)
 
     # Generate unique session IDs for different users (min 33 characters required)
@@ -156,6 +186,7 @@ def generate_demo_user_ids(fresh: bool = False) -> dict:
             "john": {"actor_id": f"demo_john_{timestamp}", "user_id": "user_123"},
             "alice": {"actor_id": f"demo_alice_{timestamp}", "user_id": "user_321"},
             "jane": {"actor_id": f"demo_jane_{timestamp}", "user_id": "user_456"},
+            "bob": {"actor_id": f"demo_bob_{timestamp}", "user_id": "user_789"},
         }
     else:
         # Use fixed IDs (may have existing long-term memory from previous runs)
@@ -163,6 +194,7 @@ def generate_demo_user_ids(fresh: bool = False) -> dict:
             "john": {"actor_id": "user_123", "user_id": "user_123"},
             "alice": {"actor_id": "user_321", "user_id": "user_321"},
             "jane": {"actor_id": "user_456", "user_id": "user_456"},
+            "bob": {"actor_id": "user_789", "user_id": "user_789"},
         }
 
 
@@ -296,8 +328,188 @@ Time: 18:00""",
     return {"phase1": phase1_results, "phase2": phase2_results}
 
 
+def run_gateway_demo(agent_runtime_arn: str, fresh: bool = False):
+    """Run a demo showing MCP Gateway integration with Risk Scoring Service.
+
+    This demo showcases 6 diverse fraud scenarios that use both local tools
+    and MCP Gateway tools for comprehensive fraud detection.
+    """
+
+    # Get Gateway config from Pulumi outputs
+    print("=" * 70)
+    print("LOADING MCP GATEWAY CONFIGURATION...")
+    print("=" * 70)
+
+    outputs = get_pulumi_outputs()
+    gateway_config = None
+
+    if outputs.get("gateway_url"):
+        gateway_config = {
+            "gateway_url": outputs.get("gateway_url"),
+            "token_endpoint": outputs.get("gateway_token_endpoint"),
+            "client_id": outputs.get("gateway_client_id"),
+            "client_secret": outputs.get("gateway_client_secret"),
+            "scope": outputs.get("gateway_scope"),
+        }
+        print(f"Gateway URL: {gateway_config['gateway_url']}")
+        print(f"Token Endpoint: {gateway_config['token_endpoint']}")
+        print(f"Scope: {gateway_config['scope']}")
+        print("MCP Gateway configuration loaded successfully!")
+    else:
+        print("[WARNING] Gateway configuration not found in Pulumi outputs.")
+        print("         The demo will run with local tools only.")
+        print("         Deploy with 'pulumi up' to enable Gateway features.")
+
+    # Generate user IDs (fresh or fixed)
+    user_ids = generate_demo_user_ids(fresh)
+
+    print("\n" + "=" * 70)
+    print("FRAUD DETECTION DEMO - MCP GATEWAY INTEGRATION")
+    print("=" * 70)
+    print("This demo shows the MCP Gateway Risk Scoring Service in action.")
+    print("The agent uses BOTH local tools and MCP Gateway tools:")
+    print("")
+    print("LOCAL TOOLS:")
+    print("  - get_user_profile: User details and home location")
+    print("  - get_recent_transactions: Last known transaction")
+    print("  - block_credit_card: Block card and create ticket")
+    print("")
+    print("MCP GATEWAY TOOLS (via Risk Scoring Service):")
+    print("  - calculate_risk_score: Fraud risk score 0-100")
+    print("  - get_fraud_indicators: Known fraud indicators")
+    print("  - check_merchant_reputation: Merchant risk rating")
+    if fresh:
+        print(f"\n*** FRESH MODE: Using unique actor IDs ***")
+    print("=" * 70)
+
+    # 6 Diverse Fraud Scenarios
+    scenarios = [
+        # Scenario 1: HIGH-RISK MERCHANT
+        {
+            "name": "1. HIGH-RISK MERCHANT - Jane at CryptoExchange123",
+            "actor_id": user_ids["jane"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["jane"]["user_id"]}
+Amount: $5000
+Merchant: CryptoExchange123
+Location: New York, USA
+Time: 10:00
+
+Please analyze this transaction using all available tools including risk scoring.""",
+            "expected": "HIGH RISK - CryptoExchange123 is a high-risk merchant (check_merchant_reputation)",
+        },
+
+        # Scenario 2: VELOCITY ATTACK (multiple rapid transactions)
+        {
+            "name": "2. VELOCITY ATTACK - Bob's Rapid Transactions",
+            "actor_id": user_ids["bob"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["bob"]["user_id"]}
+Amount: $999
+Merchant: Gaming TopUp Store
+Location: Berlin, Germany
+Time: 08:35
+
+Note: This is the 5th transaction in the last 10 minutes for this user.
+Please check fraud indicators and risk score.""",
+            "expected": "HIGH RISK - Bob has velocity indicators (get_fraud_indicators)",
+        },
+
+        # Scenario 3: AMOUNT ANOMALY (10x typical spend)
+        {
+            "name": "3. AMOUNT ANOMALY - Alice's Large Purchase",
+            "actor_id": user_ids["alice"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["alice"]["user_id"]}
+Amount: $8500
+Merchant: LuxuryOutlet Online
+Location: Singapore
+Time: 11:00
+
+This amount is much higher than typical for this user.
+Please calculate risk score and check merchant.""",
+            "expected": "HIGH RISK - Amount anomaly + high-risk merchant (calculate_risk_score)",
+        },
+
+        # Scenario 4: KNOWN FRAUD PATTERNS
+        {
+            "name": "4. KNOWN FRAUD PATTERNS - John's Indicator Check",
+            "actor_id": user_ids["john"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["john"]["user_id"]}
+Amount: $300
+Merchant: Overseas Electronics
+Location: London, UK
+Time: 12:00
+
+This user has had previous alerts. Check their fraud indicators.""",
+            "expected": "MEDIUM RISK - John has existing fraud indicators",
+        },
+
+        # Scenario 5: COMBINED SIGNALS (impossible travel + high-risk)
+        {
+            "name": "5. COMBINED SIGNALS - Alice's Multi-Factor Fraud",
+            "actor_id": user_ids["alice"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["alice"]["user_id"]}
+Amount: $2500
+Merchant: QuickCashAdvance
+Location: Los Angeles, USA
+Time: 11:30
+
+User was just in Singapore 30 minutes ago!
+Check ALL risk factors.""",
+            "expected": "DEFINITE FRAUD - Impossible travel + high-risk merchant + amount anomaly",
+        },
+
+        # Scenario 6: CLEAN TRANSACTION (all clear)
+        {
+            "name": "6. CLEAN TRANSACTION - Jane's Normal Purchase",
+            "actor_id": user_ids["jane"]["actor_id"],
+            "session_id": generate_session_id(),
+            "gateway_config": gateway_config,
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["jane"]["user_id"]}
+Amount: $89
+Merchant: Whole Foods
+Location: New York, USA
+Time: 18:30
+
+Please analyze this transaction for fraud using all available tools.""",
+            "expected": "NO FRAUD - Low-risk merchant, normal amount, home location",
+        },
+    ]
+
+    results = run_scenarios_with_gateway(agent_runtime_arn, scenarios)
+
+    # Summary
+    print("\n" + "=" * 70)
+    print("MCP GATEWAY DEMO SUMMARY")
+    print("=" * 70)
+    print("")
+    for result in results:
+        status_icon = "OK" if result["status"] == "SUCCESS" else "FAIL"
+        mcp_enabled = result.get("response", {}).get("output", {}).get("mcp_gateway_enabled", False)
+        mcp_tools = result.get("response", {}).get("output", {}).get("mcp_tools_count", 0)
+        gateway_status = f"Gateway: YES ({mcp_tools} tools)" if mcp_enabled else "Gateway: NO"
+        print(f"[{status_icon}] {result['scenario']}")
+        print(f"     {gateway_status}")
+
+    return results
+
+
 def run_scenarios(agent_runtime_arn: str, scenarios: list) -> list:
-    """Run a list of scenarios and return results."""
+    """Run a list of scenarios and return results (without gateway)."""
     results = []
     for i, scenario in enumerate(scenarios, 1):
         print(f"\n{'=' * 70}")
@@ -331,6 +543,44 @@ def run_scenarios(agent_runtime_arn: str, scenarios: list) -> list:
     return results
 
 
+def run_scenarios_with_gateway(agent_runtime_arn: str, scenarios: list) -> list:
+    """Run a list of scenarios with optional Gateway config and return results."""
+    results = []
+    for i, scenario in enumerate(scenarios, 1):
+        print(f"\n{'=' * 70}")
+        print(f"SCENARIO {i}: {scenario['name']}")
+        print(f"Expected: {scenario['expected']}")
+        print(f"Actor ID: {scenario['actor_id']}")
+        print(f"Session ID: {scenario['session_id'][:40]}...")
+        gateway_status = "ENABLED" if scenario.get("gateway_config") else "DISABLED"
+        print(f"MCP Gateway: {gateway_status}")
+        print("-" * 70)
+        print(f"Prompt:\n{scenario['prompt']}")
+        print("-" * 70)
+
+        try:
+            response = invoke_agent(
+                agent_runtime_arn,
+                scenario['prompt'],
+                actor_id=scenario['actor_id'],
+                session_id=scenario['session_id'],
+                gateway_config=scenario.get('gateway_config'),
+            )
+            print("Agent Response:")
+            print(json.dumps(response, indent=2))
+            results.append({"scenario": scenario['name'], "status": "SUCCESS", "response": response})
+        except Exception as e:
+            print(f"Error: {e}")
+            results.append({"scenario": scenario['name'], "status": "ERROR", "error": str(e)})
+
+        # Brief pause between scenarios
+        if i < len(scenarios):
+            print("\nWaiting 3 seconds before next scenario...")
+            time.sleep(3)
+
+    return results
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python invoke_agent.py <agent_runtime_arn> [mode]")
@@ -338,13 +588,17 @@ def main():
         print("Modes:")
         print("  demo           - Short-term memory demo (same session) - default")
         print("  longterm       - Long-term memory demo (cross-session, fixed user IDs)")
-        print("  longterm-fresh - Long-term memory demo with FRESH user IDs (recommended for live demos)")
+        print("  longterm-fresh - Long-term memory demo with FRESH user IDs")
+        print("  gateway        - MCP Gateway demo (6 diverse fraud scenarios)")
+        print("  gateway-fresh  - MCP Gateway demo with FRESH user IDs (recommended)")
         print("  single         - Run single fraud alert")
         print("")
         print("Examples:")
         print("  python invoke_agent.py arn:aws:... demo")
         print("  python invoke_agent.py arn:aws:... longterm")
-        print("  python invoke_agent.py arn:aws:... longterm-fresh  # Best for live demos!")
+        print("  python invoke_agent.py arn:aws:... longterm-fresh")
+        print("  python invoke_agent.py arn:aws:... gateway        # MCP Gateway demo!")
+        print("  python invoke_agent.py arn:aws:... gateway-fresh  # Best for live demos!")
         print("  python invoke_agent.py arn:aws:... single")
         sys.exit(1)
 
@@ -357,6 +611,10 @@ def main():
         run_longterm_demo(agent_runtime_arn, fresh=False)
     elif mode == "longterm-fresh":
         run_longterm_demo(agent_runtime_arn, fresh=True)
+    elif mode == "gateway":
+        run_gateway_demo(agent_runtime_arn, fresh=False)
+    elif mode == "gateway-fresh":
+        run_gateway_demo(agent_runtime_arn, fresh=True)
     else:
         # Single fraud alert (original behavior)
         default_prompt = """ALERT: New Transaction Attempt
