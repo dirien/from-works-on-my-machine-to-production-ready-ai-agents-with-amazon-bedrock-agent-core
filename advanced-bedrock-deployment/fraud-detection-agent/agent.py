@@ -1,12 +1,14 @@
 # agent.py
 import os
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from strands import Agent
 from strands.models import BedrockModel
 from strands.hooks import AgentInitializedEvent, HookProvider, HookRegistry, MessageAddedEvent, AfterInvocationEvent
+from strands.tools.mcp.mcp_client import MCPClient
 from bedrock_agentcore.memory import MemoryClient
 from tools import get_user_profile, get_recent_transactions, block_credit_card
 
@@ -56,6 +58,19 @@ MEMORY CAPABILITIES:
 - CRITICAL: Before blocking a card, check BOTH short-term and long-term memory for any record of the card being blocked.
 - If you see ANY previous record mentioning "BLOCKED" or "Card blocked" for a user, inform them the card is ALREADY BLOCKED and provide the existing ticket ID.
 
+AVAILABLE TOOLS:
+You have access to TWO types of tools:
+
+1. LOCAL TOOLS (direct access):
+   - get_user_profile(user_id): Get user details and home location
+   - get_recent_transactions(user_id): Get last known transaction
+   - block_credit_card(user_id, reason): Block the card and create ticket
+
+2. MCP GATEWAY TOOLS (via Risk Scoring Service - if available):
+   - calculate_risk_score(user_id, amount, merchant, location): Get fraud risk score 0-100
+   - get_fraud_indicators(user_id): Get known fraud indicators for user
+   - check_merchant_reputation(merchant_name): Check merchant risk rating
+
 When you receive a valid transaction alert:
 1. FIRST: Check the LONG-TERM MEMORY CONTEXT section below for any facts about this user from previous sessions.
 2. SECOND: Check the SHORT-TERM CONVERSATION HISTORY for recent actions in this session.
@@ -63,17 +78,27 @@ When you receive a valid transaction alert:
 4. If NOT already blocked:
    a. Use get_user_profile() to check the user's home location.
    b. Use get_recent_transactions() to get their last transaction.
-   c. Analyze for fraud indicators (impossible travel, unusual amounts, high-risk merchants).
-   d. If fraud is detected, use block_credit_card() immediately.
-5. Provide a brief analysis (2-3 sentences max).
+   c. If MCP Gateway tools are available:
+      - Use calculate_risk_score() to get comprehensive risk assessment
+      - Use check_merchant_reputation() to verify merchant safety
+      - Use get_fraud_indicators() to check for existing fraud patterns
+   d. Analyze for fraud indicators (impossible travel, unusual amounts, high-risk merchants, elevated risk scores).
+   e. If fraud is detected OR risk score >= 60, use block_credit_card() immediately.
+5. Provide a brief analysis (2-3 sentences max) including risk score if available.
 
 Keep responses short and focused. No lengthy explanations.
 """
 
 
-def build_system_prompt_with_context(long_term_facts: List[str], short_term_context: list) -> str:
+def build_system_prompt_with_context(long_term_facts: List[str], short_term_context: list, mcp_tools_available: bool = False) -> str:
     """Build system prompt including both long-term facts and short-term conversation context."""
     prompt_parts = [BASE_SYSTEM_PROMPT]
+
+    # Add MCP tools availability note
+    if mcp_tools_available:
+        prompt_parts.append("\n\nMCP GATEWAY STATUS: CONNECTED - Risk scoring tools are available.")
+    else:
+        prompt_parts.append("\n\nMCP GATEWAY STATUS: NOT CONNECTED - Using local tools only.")
 
     # Add long-term memory facts
     if long_term_facts:
@@ -227,6 +252,77 @@ class MemoryHookProvider(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.on_after_invocation)
 
 
+_cognito_error: Optional[str] = None
+
+def get_cognito_token(token_endpoint: str, client_id: str, client_secret: str, scope: str) -> Optional[str]:
+    """Get OAuth2 token from Cognito for Gateway access."""
+    global _cognito_error
+    _cognito_error = None
+    try:
+        import base64
+        auth_string = f"{client_id}:{client_secret}"
+        auth_bytes = base64.b64encode(auth_string.encode()).decode()
+
+        print(f"[GATEWAY] Requesting token from {token_endpoint}")
+        print(f"[GATEWAY] Scope: {scope}")
+
+        response = httpx.post(
+            token_endpoint,
+            headers={
+                "Authorization": f"Basic {auth_bytes}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "client_credentials",
+                "scope": scope,
+            },
+            timeout=30.0,
+        )
+
+        if response.status_code != 200:
+            _cognito_error = f"Token request failed: HTTP {response.status_code} - {response.text[:200]}"
+            print(f"[GATEWAY] {_cognito_error}")
+            return None
+
+        token_data = response.json()
+        access_token = token_data.get("access_token")
+        if access_token:
+            print(f"[GATEWAY] Got access token successfully (length: {len(access_token)})")
+            return access_token
+        else:
+            _cognito_error = f"No access_token in response: {token_data}"
+            print(f"[GATEWAY] {_cognito_error}")
+            return None
+
+    except httpx.ConnectError as e:
+        _cognito_error = f"Connection error to Cognito: {e}"
+        print(f"[GATEWAY] {_cognito_error}")
+        return None
+    except httpx.TimeoutException as e:
+        _cognito_error = f"Timeout connecting to Cognito: {e}"
+        print(f"[GATEWAY] {_cognito_error}")
+        return None
+    except Exception as e:
+        _cognito_error = f"Unexpected error getting token: {type(e).__name__}: {e}"
+        print(f"[GATEWAY] {_cognito_error}")
+        return None
+
+
+def get_cognito_error() -> Optional[str]:
+    """Get the last Cognito error."""
+    global _cognito_error
+    return _cognito_error
+
+
+def create_mcp_transport(gateway_url: str, access_token: str):
+    """Create MCP streamable HTTP transport for Gateway connection."""
+    from mcp.client.streamable_http import streamablehttp_client
+    return streamablehttp_client(
+        gateway_url,
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+
+
 class InvocationRequest(BaseModel):
     input: Dict[str, Any]
 
@@ -235,13 +331,12 @@ class InvocationResponse(BaseModel):
     output: Dict[str, Any]
 
 
-def create_agent_with_memory(actor_id: str, session_id: str) -> tuple[Agent, MemoryHookProvider | None]:
-    """Create an agent with AgentCore short-term and long-term memory."""
+def setup_memory_hooks(actor_id: str, session_id: str) -> tuple[list, Optional[MemoryHookProvider], List[str]]:
+    """Set up memory hooks and retrieve long-term facts."""
     hooks = []
     memory_hook = None
     long_term_facts = []
 
-    # Set up memory hooks for storing conversations and retrieving long-term facts
     if memory_client and MEMORY_ID:
         try:
             print(f"[MEMORY] Setting up memory for actor={actor_id}, session={session_id}")
@@ -254,7 +349,6 @@ def create_agent_with_memory(actor_id: str, session_id: str) -> tuple[Agent, Mem
             hooks.append(memory_hook)
 
             # Pre-retrieve long-term facts before agent initialization
-            # (This happens again in the hook, but we need it for the system prompt)
             namespace = LONG_TERM_MEMORY_NAMESPACE.replace("{actorId}", actor_id)
             print(f"[LONG-TERM MEMORY] Pre-retrieving facts from namespace: {namespace}")
             try:
@@ -281,20 +375,143 @@ def create_agent_with_memory(actor_id: str, session_id: str) -> tuple[Agent, Mem
         except Exception as e:
             print(f"[MEMORY] Failed to create memory hook: {type(e).__name__}: {e}")
 
-    # Build system prompt with long-term facts (short-term context is empty at start)
-    system_prompt = build_system_prompt_with_context(long_term_facts, [])
-    print(f"[AGENT] System prompt length: {len(system_prompt)} chars")
-    print(f"[AGENT] Long-term facts included: {len(long_term_facts)}")
+    return hooks, memory_hook, long_term_facts
+
+
+_last_mcp_error: Optional[str] = None
+
+def create_mcp_client(gateway_config: Dict[str, str]) -> Optional[MCPClient]:
+    """Create MCP client for Gateway connection."""
+    global _last_mcp_error
+    _last_mcp_error = None
+    try:
+        gateway_url = gateway_config.get("gateway_url")
+        token_endpoint = gateway_config.get("token_endpoint")
+        client_id = gateway_config.get("client_id")
+        client_secret = gateway_config.get("client_secret")
+        scope = gateway_config.get("scope")
+
+        if all([gateway_url, token_endpoint, client_id, client_secret, scope]):
+            print(f"[GATEWAY] Connecting to MCP Gateway at {gateway_url}")
+            access_token = get_cognito_token(token_endpoint, client_id, client_secret, scope)
+
+            if access_token:
+                print(f"[GATEWAY] Got access token (length: {len(access_token)})")
+
+                def transport_factory():
+                    return create_mcp_transport(gateway_url, access_token)
+
+                mcp_client = MCPClient(transport_factory)
+                print(f"[GATEWAY] MCP client created successfully")
+                return mcp_client
+            else:
+                cognito_err = get_cognito_error()
+                _last_mcp_error = f"Failed to get Cognito token: {cognito_err}"
+                print(f"[GATEWAY] {_last_mcp_error}")
+        else:
+            missing = [k for k, v in gateway_config.items() if not v]
+            _last_mcp_error = f"Missing gateway config parameters: {missing}"
+            print(f"[GATEWAY] {_last_mcp_error}")
+    except Exception as e:
+        _last_mcp_error = f"{type(e).__name__}: {e}"
+        print(f"[GATEWAY] Failed to create MCP client: {_last_mcp_error}")
+        import traceback
+        traceback.print_exc()
+
+    return None
+
+
+def get_last_mcp_error() -> Optional[str]:
+    """Get the last MCP error message."""
+    global _last_mcp_error
+    return _last_mcp_error
+
+
+def run_agent_with_mcp(
+    user_message: str,
+    actor_id: str,
+    session_id: str,
+    gateway_config: Optional[Dict[str, str]] = None
+) -> tuple[Any, Optional[MemoryHookProvider], bool, list, Optional[str]]:
+    """Run agent with MCP Gateway tools inside the MCP context.
+
+    IMPORTANT: MCP tools only work when agent runs INSIDE the MCP client context.
+    This function handles the context management properly.
+
+    Returns:
+        Tuple of (result, memory_hook, mcp_enabled, mcp_tools, error_message)
+    """
+    # Set up memory
+    hooks, memory_hook, long_term_facts = setup_memory_hooks(actor_id, session_id)
+
+    # Local tools are always available
+    local_tools = [get_user_profile, get_recent_transactions, block_credit_card]
+
+    # Try to create MCP client if config provided
+    mcp_client = None
+    mcp_error = None
+    if gateway_config:
+        mcp_client = create_mcp_client(gateway_config)
+        if mcp_client is None:
+            mcp_error = get_last_mcp_error() or "Failed to create MCP client (unknown error)"
+
+    # If we have MCP client, run agent INSIDE the context
+    if mcp_client:
+        try:
+            print(f"[GATEWAY] Entering MCP client context...")
+            with mcp_client:
+                # List MCP tools while inside context
+                mcp_tools = mcp_client.list_tools_sync()
+                print(f"[GATEWAY] Retrieved {len(mcp_tools)} MCP tools")
+
+                if mcp_tools:
+                    tool_names = [t.name if hasattr(t, 'name') else str(t) for t in mcp_tools]
+                    print(f"[GATEWAY] MCP tools: {tool_names}")
+
+                    # Combine local and MCP tools
+                    all_tools = local_tools + list(mcp_tools)
+
+                    # Build system prompt with MCP tools available
+                    system_prompt = build_system_prompt_with_context(
+                        long_term_facts, [], mcp_tools_available=True
+                    )
+
+                    # Create and run agent INSIDE the MCP context
+                    agent = Agent(
+                        model=bedrock_model,
+                        tools=all_tools,
+                        system_prompt=system_prompt,
+                        hooks=hooks,
+                        state={"actor_id": actor_id, "session_id": session_id}
+                    )
+
+                    print(f"[AGENT] Running with {len(all_tools)} tools ({len(local_tools)} local + {len(mcp_tools)} MCP)")
+                    result = agent(user_message)
+                    return result, memory_hook, True, mcp_tools, None
+
+        except Exception as e:
+            mcp_error = f"{type(e).__name__}: {e}"
+            print(f"[GATEWAY] Error using MCP tools: {mcp_error}")
+            import traceback
+            traceback.print_exc()
+            # Fall through to run without MCP tools
+
+    # Run without MCP tools (fallback or no gateway config)
+    print(f"[AGENT] Running with local tools only ({len(local_tools)} tools)")
+    system_prompt = build_system_prompt_with_context(
+        long_term_facts, [], mcp_tools_available=False
+    )
 
     agent = Agent(
         model=bedrock_model,
-        tools=[get_user_profile, get_recent_transactions, block_credit_card],
+        tools=local_tools,
         system_prompt=system_prompt,
         hooks=hooks,
         state={"actor_id": actor_id, "session_id": session_id}
     )
 
-    return agent, memory_hook
+    result = agent(user_message)
+    return result, memory_hook, False, [], mcp_error
 
 
 @app.post("/invocations", response_model=InvocationResponse)
@@ -304,16 +521,32 @@ async def invoke_agent(request: InvocationRequest):
         actor_id = request.input.get("actor_id", "default_actor")
         session_id = request.input.get("session_id", f"session_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
 
+        # Optional Gateway config passed in request (for demo purposes)
+        gateway_config = request.input.get("gateway_config", None)
+
         if not user_message:
             raise HTTPException(
                 status_code=400,
                 detail="No prompt found in input"
             )
 
-        # Create agent with memory for this request
-        agent, memory_hook = create_agent_with_memory(actor_id, session_id)
+        print(f"[INVOKE] actor_id={actor_id}, session_id={session_id[:20]}...")
+        print(f"[INVOKE] gateway_config provided: {gateway_config is not None}")
 
-        result = agent(user_message)
+        # Build debug info about gateway config
+        gateway_debug = {
+            "config_provided": gateway_config is not None,
+            "gateway_url": gateway_config.get("gateway_url", "NOT SET") if gateway_config else "NO CONFIG",
+            "has_client_secret": bool(gateway_config.get("client_secret")) if gateway_config else False,
+        }
+        if gateway_config:
+            print(f"[INVOKE] gateway_url: {gateway_config.get('gateway_url', 'N/A')}")
+            print(f"[INVOKE] has_client_secret: {bool(gateway_config.get('client_secret'))}")
+
+        # Run agent with MCP Gateway (if configured) - handles context management
+        result, memory_hook, mcp_tools_available, mcp_tools, mcp_error = run_agent_with_mcp(
+            user_message, actor_id, session_id, gateway_config
+        )
 
         # Get the number of long-term facts retrieved
         long_term_facts_count = len(memory_hook.get_long_term_facts()) if memory_hook else 0
@@ -327,6 +560,10 @@ async def invoke_agent(request: InvocationRequest):
             "memory_enabled": memory_client is not None and MEMORY_ID is not None,
             "long_term_memory_enabled": True,
             "long_term_facts_retrieved": long_term_facts_count,
+            "mcp_gateway_enabled": mcp_tools_available,
+            "mcp_tools_count": len(mcp_tools) if mcp_tools else 0,
+            "mcp_error": mcp_error if mcp_error else "NO_ERROR",
+            "gateway_debug": gateway_debug,
         }
         return InvocationResponse(output=response)
     except Exception as e:
@@ -342,6 +579,7 @@ async def ping():
         "memory_id": MEMORY_ID,
         "long_term_memory_enabled": True,
         "long_term_memory_namespace": LONG_TERM_MEMORY_NAMESPACE,
+        "mcp_gateway_supported": True,
     }
 
 

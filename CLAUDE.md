@@ -4,7 +4,11 @@ This file provides guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-This repository contains a fraud detection agent demo built with the Strands SDK and Amazon Bedrock. The project demonstrates the "Impossible Traveler" detection pattern - identifying fraudulent transactions based on physically impossible location changes.
+This repository contains a fraud detection agent demo built with the Strands SDK and Amazon Bedrock. The project demonstrates multiple fraud detection patterns including:
+- **Impossible Traveler**: Detecting fraudulent transactions based on physically impossible location changes
+- **High-Risk Merchant**: Identifying transactions at risky merchants via MCP Gateway
+- **Velocity Attack**: Detecting multiple rapid transactions
+- **Amount Anomaly**: Flagging purchases outside typical spending patterns
 
 ## Repository Structure
 
@@ -29,17 +33,22 @@ This repository contains a fraud detection agent demo built with the Strands SDK
 │   ├── invoke_agent.py           # Script to invoke deployed agent
 │   ├── test.sh                   # Test script with Pulumi ESC credentials
 │   └── pyproject.toml            # Test script dependencies
-├── advanced-bedrock-deployment/  # Advanced deployment with Short-term & Long-term Memory
-│   ├── fraud-detection-agent/    # Agent container code with memory integration
-│   │   ├── agent.py              # FastAPI agent with short-term & long-term memory hooks
-│   │   ├── tools.py              # Tools with card blocking state tracking
+├── advanced-bedrock-deployment/  # Advanced deployment with Memory & MCP Gateway
+│   ├── fraud-detection-agent/    # Agent container code with memory & gateway integration
+│   │   ├── agent.py              # FastAPI agent with memory hooks & MCP Gateway support
+│   │   ├── tools.py              # Local tools with card blocking state tracking
 │   │   ├── Dockerfile            # Container build for ARM64
-│   │   ├── pyproject.toml        # Agent dependencies (includes bedrock-agentcore)
+│   │   ├── pyproject.toml        # Agent dependencies (bedrock-agentcore, mcp)
 │   │   └── uv.lock               # Locked dependencies
-│   ├── infra/                    # Pulumi infrastructure with Memory, Strategy & CloudWatch
-│   │   ├── __main__.py           # Pulumi program (Memory, Strategy, Guardrails, CloudWatch, AgentCore)
+│   ├── mcp-risk-server/          # MCP Risk Scoring Server (accessed via Gateway)
+│   │   ├── server.py             # FastMCP server with risk tools
+│   │   ├── Dockerfile            # Container build for ARM64
+│   │   ├── pyproject.toml        # MCP server dependencies
+│   │   └── uv.lock               # Locked dependencies
+│   ├── infra/                    # Pulumi infrastructure with Memory, Gateway & CloudWatch
+│   │   ├── __main__.py           # Pulumi program (Memory, Gateway, Cognito, OAuth2, etc.)
 │   │   └── pyproject.toml        # Pulumi dependencies
-│   ├── invoke_agent.py           # Multi-user demo script (short-term & long-term memory)
+│   ├── invoke_agent.py           # Multi-user demo script (memory & gateway demos)
 │   └── pyproject.toml            # Test script dependencies
 ├── assets/                       # Presentation assets
 ├── CLAUDE.md                     # This file - Claude Code guidance
@@ -72,7 +81,7 @@ This deploys:
 - Bedrock Guardrails for fraud detection scope enforcement
 - Bedrock AgentCore Agent Runtime
 
-### Advanced Deployment (with Short-term & Long-term Memory)
+### Advanced Deployment (with Memory & MCP Gateway)
 
 ```bash
 cd advanced-bedrock-deployment/infra
@@ -81,15 +90,27 @@ uv run pulumi up
 ```
 
 This deploys everything in the basic deployment plus:
+
+**Memory Infrastructure:**
 - **AgentCore Memory**: Memory storage with 30-day event expiry
 - **Short-term Memory**: Conversation history within the same session
 - **Long-term Memory**: Semantic extraction strategy for cross-session memory
   - Custom semantic strategy extracts fraud-related facts from conversations
   - Uses Claude Haiku for efficient fact extraction
   - Namespace: `/fraud-detection/users/{actorId}` for per-user isolation
-- **CloudWatch Observability**: Application logs and X-Ray traces
 - **Memory Hooks**: Strands SDK hooks for storing messages and retrieving long-term facts
-- **Card Blocking State**: Tools track blocked card status across requests
+
+**MCP Gateway Infrastructure:**
+- **Cognito User Pool (Gateway)**: JWT authentication for Gateway access
+- **Cognito User Pool (Runtime)**: OAuth2 authentication for Gateway→MCP Server
+- **OAuth2 Credential Provider**: Manages Gateway outbound authentication
+- **AgentCore Gateway**: MCP protocol gateway with semantic tool search
+- **MCP Risk Server Runtime**: FastMCP server deployed to AgentCore
+- **Gateway Target**: Connects Gateway to MCP Risk Server endpoint
+
+**Observability:**
+- **CloudWatch Logs**: Application logs for agent, memory, gateway, and MCP server
+- **X-Ray Traces**: Distributed tracing for request flow
 
 ## Testing the Deployed Agent
 
@@ -136,15 +157,32 @@ The long-term memory demo runs in 2 phases with DIFFERENT sessions:
 4. **Alice Chen - NEW SESSION**: Agent recalls from long-term memory that card is ALREADY BLOCKED
 5. **Jane Smith - NEW SESSION**: No fraud history in long-term memory, normal processing
 
-### Advanced Demo (Long-term Memory - Fresh Mode for Live Demos)
+### Advanced Demo (MCP Gateway - Risk Scoring)
 
 ```bash
 cd advanced-bedrock-deployment
 uv sync
-uv run python invoke_agent.py <agent_runtime_arn> longterm-fresh
+uv run python invoke_agent.py <agent_runtime_arn> gateway
 ```
 
-The `longterm-fresh` mode is **recommended for live demos**. It generates unique actor IDs with timestamps to avoid interference from previous test runs while keeping the same user IDs in prompts (so the mock tools work correctly).
+The MCP Gateway demo runs 6 diverse fraud scenarios using both local tools and MCP Gateway tools:
+
+1. **High-Risk Merchant**: Jane at CryptoExchange123 (uses `check_merchant_reputation`)
+2. **Velocity Attack**: Bob's rapid transactions (uses `get_fraud_indicators`)
+3. **Amount Anomaly**: Alice's 10x typical spend (uses `calculate_risk_score`)
+4. **Known Fraud Patterns**: John's indicator check (uses `get_fraud_indicators`)
+5. **Combined Signals**: Alice - impossible travel + high-risk merchant (all tools)
+6. **Clean Transaction**: Jane's normal purchase at Whole Foods (all tools, no fraud)
+
+### Demo Modes with Fresh IDs (Recommended for Live Demos)
+
+```bash
+# Long-term memory with fresh IDs
+uv run python invoke_agent.py <agent_runtime_arn> longterm-fresh
+
+# MCP Gateway with fresh IDs
+uv run python invoke_agent.py <agent_runtime_arn> gateway-fresh
+```
 
 **Why use fresh mode?**
 - Old test runs store facts in long-term memory that persist for 30 days
@@ -162,8 +200,15 @@ The `longterm-fresh` mode is **recommended for live demos**. It generates unique
 - **Amazon Bedrock AgentCore Memory Strategy**: Custom semantic extraction
   - Uses Claude Haiku for efficient fact extraction and consolidation
   - Extracts fraud-related facts (card status, tickets, patterns)
+- **Amazon Bedrock AgentCore Gateway**: MCP protocol gateway for tool discovery
+  - JWT authentication via Cognito
+  - OAuth2 credential provider for outbound auth
+  - Semantic tool search for intelligent tool discovery
 - **Amazon Bedrock Guardrails**: Content filtering and topic enforcement
 - **Amazon CloudWatch**: Application logs and X-Ray traces for observability
+- **Amazon Cognito**: OAuth2/JWT authentication for Gateway
+- **Model Context Protocol (MCP)**: Standard protocol for tool integration
+- **FastMCP**: Python framework for building MCP servers
 - **Pulumi**: Infrastructure as Code for AWS resources
 - **Pulumi ESC**: Credential management for AWS access
 - **uv**: Python package manager
@@ -171,10 +216,17 @@ The `longterm-fresh` mode is **recommended for live demos**. It generates unique
 
 ## Agent Architecture
 
-The fraud agent uses three tools:
+The fraud agent uses two types of tools:
+
+### Local Tools (Direct Access)
 1. `get_user_profile()` - Retrieves user details and home location
 2. `get_recent_transactions()` - Gets last known transaction
 3. `block_credit_card()` - Blocks the card and creates a ticket
+
+### MCP Gateway Tools (via Risk Scoring Service)
+1. `calculate_risk_score()` - Returns risk score 0-100 with factors
+2. `get_fraud_indicators()` - Gets known fraud indicators for a user
+3. `check_merchant_reputation()` - Checks merchant risk rating and fraud history
 
 ## Commands
 
@@ -188,9 +240,28 @@ The fraud agent uses three tools:
 - `cd basic-bedrock-deployment && ./test.sh` - Test deployed agent
 - `cd basic-bedrock-deployment/infra && uv run pulumi destroy` - Tear down infrastructure
 
-### Advanced Production Deployment (Short-term & Long-term Memory)
-- `cd advanced-bedrock-deployment/infra && uv run pulumi up` - Deploy infrastructure with memory
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> demo` - Run short-term memory demo
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm` - Run long-term memory demo (fixed user IDs)
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm-fresh` - Run long-term memory demo (fresh IDs, recommended for live demos)
+### Advanced Production Deployment (Memory & MCP Gateway)
+- `cd advanced-bedrock-deployment/infra && uv run pulumi up` - Deploy all infrastructure
+- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> demo` - Short-term memory demo
+- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm` - Long-term memory demo
+- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm-fresh` - Long-term memory (fresh IDs)
+- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> gateway` - MCP Gateway demo
+- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> gateway-fresh` - MCP Gateway (fresh IDs, recommended)
 - `cd advanced-bedrock-deployment/infra && uv run pulumi destroy` - Tear down infrastructure
+
+## Pulumi Stack Outputs
+
+After deployment, the following outputs are available:
+
+```bash
+cd advanced-bedrock-deployment/infra
+pulumi stack output --json
+```
+
+Key outputs include:
+- `agent_runtime_arn` - ARN for invoking the fraud detection agent
+- `gateway_url` - URL for the MCP Gateway
+- `gateway_client_id` - Cognito client ID for Gateway access
+- `gateway_client_secret` - Cognito client secret (sensitive)
+- `mcp_server_runtime_url` - URL for the MCP Risk Server
+- `memory_id` - ID of the AgentCore Memory resource
