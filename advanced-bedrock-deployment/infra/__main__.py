@@ -116,6 +116,15 @@ memory_execution_policy = iam.get_policy_document_output(
             ],
             resources=["*"],
         ),
+        # AWS Marketplace permissions required for Bedrock model access
+        iam.GetPolicyDocumentStatementArgs(
+            effect="Allow",
+            actions=[
+                "aws-marketplace:ViewSubscriptions",
+                "aws-marketplace:Subscribe",
+            ],
+            resources=["*"],
+        ),
     ]
 )
 
@@ -125,18 +134,54 @@ memory_role_policy = iam.RolePolicy(
     policy=memory_execution_policy.json,
 )
 
-# Create AgentCore Memory with 7-day event expiry (short-term memory only, no strategies)
+# Create AgentCore Memory with 30-day event expiry
 fraud_detection_memory = bedrock.AgentcoreMemory(
     "fraud-detection-memory",
     name="fraud_detection_memory_advanced",
-    description="Short-term memory for fraud detection agent - stores recent conversation history",
-    event_expiry_duration=7,  # Events expire after 7 days for short-term memory
+    description="Memory for fraud detection agent - supports short-term and long-term memory",
+    event_expiry_duration=30,  # Events expire after 30 days
     memory_execution_role_arn=memory_execution_role.arn,
     opts=pulumi.ResourceOptions(depends_on=[memory_role_policy]),
 )
 
-# Note: No memory strategies for short-term memory only
-# Short-term memory stores raw conversation events without additional processing
+# ============================================================================
+# Long-term Memory Strategy - Semantic Extraction for Fraud Detection
+# ============================================================================
+
+# Custom semantic extraction prompt for fraud detection context
+FRAUD_EXTRACTION_PROMPT = """
+Extract key fraud-related facts from this conversation about the user. Focus on:
+1. Credit card status (blocked/active, ticket IDs if blocked)
+2. Fraud alerts and patterns detected for this user
+3. Transaction history patterns (locations, amounts, frequencies)
+4. User profile details relevant to fraud detection (home location, spending patterns)
+5. Previous fraud investigations and their outcomes
+
+Format as concise facts that can help identify fraud patterns across sessions.
+"""
+
+# Create long-term memory strategy for extracting fraud-related semantic information
+fraud_semantic_strategy = bedrock.AgentcoreMemoryStrategy(
+    "fraud-semantic-strategy",
+    name="fraud_semantic_extraction",
+    memory_id=fraud_detection_memory.id,
+    memory_execution_role_arn=memory_execution_role.arn,
+    type="CUSTOM",
+    description="Extracts and consolidates fraud detection facts from conversations for long-term memory",
+    namespaces=["/fraud-detection/users/{actorId}"],
+    configuration={
+        "type": "SEMANTIC_OVERRIDE",
+        "extraction": {
+            "append_to_prompt": FRAUD_EXTRACTION_PROMPT,
+            "model_id": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        },
+        "consolidation": {
+            "append_to_prompt": "Consolidate fraud detection facts while preserving critical information about blocked cards, fraud alerts, and suspicious patterns.",
+            "model_id": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        },
+    },
+    opts=pulumi.ResourceOptions(depends_on=[fraud_detection_memory]),
+)
 
 # Create an ECR repository for the agent container
 repo = ecr.Repository(
@@ -303,6 +348,7 @@ agent_runtime = bedrock.AgentcoreAgentRuntime(
         agent_guardrail_policy,
         agent_memory_policy,
         fraud_detection_memory,
+        fraud_semantic_strategy,
     ]),
 )
 
@@ -417,6 +463,8 @@ pulumi.export("guardrail_arn", fraud_detection_guardrail.guardrail_arn)
 # Export Memory outputs
 pulumi.export("memory_id", fraud_detection_memory.id)
 pulumi.export("memory_arn", fraud_detection_memory.arn)
+pulumi.export("memory_strategy_id", fraud_semantic_strategy.id)
+pulumi.export("memory_strategy_name", fraud_semantic_strategy.name)
 
 # Export ECR and AgentCore outputs
 pulumi.export("repository_url", repo.repository_url)
