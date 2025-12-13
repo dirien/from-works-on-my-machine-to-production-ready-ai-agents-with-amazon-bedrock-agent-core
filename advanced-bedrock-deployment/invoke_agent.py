@@ -1,4 +1,4 @@
-"""Invoke the Advanced Fraud Detection Agent with Memory on Bedrock AgentCore"""
+"""Invoke the Advanced Fraud Detection Agent with Short-term and Long-term Memory on Bedrock AgentCore"""
 
 import boto3
 import json
@@ -37,17 +37,25 @@ def invoke_agent(agent_runtime_arn: str, prompt: str, actor_id: str = None, sess
     return response_data
 
 
+def generate_session_id() -> str:
+    """Generate a unique session ID (min 33 characters required by AgentCore)."""
+    return f"session_{uuid.uuid4().hex}{uuid.uuid4().hex[:10]}"
+
+
 def run_demo_scenario(agent_runtime_arn: str):
-    """Run a comprehensive demo showing multiple users and memory features."""
+    """Run a comprehensive demo showing short-term memory (same session)."""
 
     print("=" * 70)
-    print("ADVANCED FRAUD DETECTION AGENT DEMO - AgentCore Memory")
+    print("FRAUD DETECTION DEMO - SHORT-TERM MEMORY (Same Session)")
+    print("=" * 70)
+    print("This demo shows short-term memory within the SAME session.")
+    print("For long-term memory demo, use: python invoke_agent.py <arn> longterm")
     print("=" * 70)
 
     # Generate unique session IDs for different users (min 33 characters required)
-    john_session = f"john_session_{uuid.uuid4().hex}{uuid.uuid4().hex[:10]}"
-    jane_session = f"jane_session_{uuid.uuid4().hex}{uuid.uuid4().hex[:10]}"
-    alice_session = f"alice_session_{uuid.uuid4().hex}{uuid.uuid4().hex[:10]}"
+    john_session = generate_session_id()
+    jane_session = generate_session_id()
+    alice_session = generate_session_id()
 
     scenarios = [
         # Scenario 1: John Doe - Impossible travel (FRAUD)
@@ -78,9 +86,9 @@ Time: 14:30""",
             "expected": "NO FRAUD - transaction at home location",
         },
 
-        # Scenario 3: John Doe - Another suspicious transaction (same session - memory should recall)
+        # Scenario 3: John Doe - Another suspicious transaction (same session - short-term memory)
         {
-            "name": "John Doe - Follow-up Transaction (Memory Test)",
+            "name": "John Doe - Follow-up Transaction (Short-term Memory Test)",
             "actor_id": "user_123",
             "session_id": john_session,
             "prompt": """ALERT: New Transaction Attempt
@@ -89,7 +97,7 @@ Amount: $500
 Merchant: Gift Card Kiosk
 Location: Tokyo, Japan
 Time: 09:20""",
-            "expected": "FRAUD - card should already be blocked from previous alert",
+            "expected": "FRAUD - card should already be blocked from previous alert (SHORT-TERM MEMORY)",
         },
 
         # Scenario 4: Alice Chen - Impossible travel (FRAUD)
@@ -108,7 +116,7 @@ Time: 10:30""",
 
         # Scenario 5: Jane Smith - Another normal transaction (same session)
         {
-            "name": "Jane Smith - Second Normal Transaction (Memory Test)",
+            "name": "Jane Smith - Second Normal Transaction",
             "actor_id": "user_456",
             "session_id": jane_session,
             "prompt": """ALERT: New Transaction Attempt
@@ -121,13 +129,182 @@ Time: 19:00""",
         },
     ]
 
+    results = run_scenarios(agent_runtime_arn, scenarios)
+
+    # Summary
+    print("\n" + "=" * 70)
+    print("SHORT-TERM MEMORY DEMO SUMMARY")
+    print("=" * 70)
+    for result in results:
+        status_icon = "OK" if result["status"] == "SUCCESS" else "FAIL"
+        print(f"[{status_icon}] {result['scenario']}")
+
+    return results
+
+
+def generate_demo_user_ids(fresh: bool = False) -> dict:
+    """Generate user IDs for demo. If fresh=True, generate unique actor IDs to avoid memory interference.
+
+    Note: We use different actor_ids for memory isolation but keep the same user IDs in prompts
+    because the mock tools only recognize user_123, user_321, user_456.
+    """
+    if fresh:
+        # Generate unique actor IDs with timestamp to avoid interference from previous runs
+        # The actor_id is used for memory storage, while the prompt still uses known user IDs
+        timestamp = int(time.time())
+        return {
+            "john": {"actor_id": f"demo_john_{timestamp}", "user_id": "user_123"},
+            "alice": {"actor_id": f"demo_alice_{timestamp}", "user_id": "user_321"},
+            "jane": {"actor_id": f"demo_jane_{timestamp}", "user_id": "user_456"},
+        }
+    else:
+        # Use fixed IDs (may have existing long-term memory from previous runs)
+        return {
+            "john": {"actor_id": "user_123", "user_id": "user_123"},
+            "alice": {"actor_id": "user_321", "user_id": "user_321"},
+            "jane": {"actor_id": "user_456", "user_id": "user_456"},
+        }
+
+
+def run_longterm_demo(agent_runtime_arn: str, fresh: bool = False):
+    """Run a demo showing long-term memory across DIFFERENT sessions."""
+
+    # Generate user IDs (fresh or fixed)
+    user_ids = generate_demo_user_ids(fresh)
+
+    print("=" * 70)
+    print("FRAUD DETECTION DEMO - LONG-TERM MEMORY (Cross-Session)")
+    print("=" * 70)
+    print("This demo shows long-term memory across DIFFERENT sessions.")
+    print("The agent should remember facts about users from previous sessions.")
+    if fresh:
+        print(f"\n*** FRESH MODE: Using unique actor IDs to avoid memory interference ***")
+        print(f"    John actor_id: {user_ids['john']['actor_id']} (user_id: {user_ids['john']['user_id']})")
+        print(f"    Alice actor_id: {user_ids['alice']['actor_id']} (user_id: {user_ids['alice']['user_id']})")
+        print(f"    Jane actor_id: {user_ids['jane']['actor_id']} (user_id: {user_ids['jane']['user_id']})")
+    else:
+        print(f"\n*** STANDARD MODE: Using fixed actor IDs (may have existing memory) ***")
+        print("    Tip: Use 'longterm-fresh' mode for clean demo runs")
+    print("=" * 70)
+
+    # Phase 1: Initial fraud detection (creates long-term memory facts)
+    print("\n" + "=" * 70)
+    print("PHASE 1: INITIAL FRAUD DETECTION")
+    print("These interactions create long-term memory facts about users.")
+    print("=" * 70)
+
+    phase1_scenarios = [
+        {
+            "name": "John Doe - Initial Fraud (Card Blocked)",
+            "actor_id": user_ids["john"]["actor_id"],
+            "session_id": generate_session_id(),  # New session
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["john"]["user_id"]}
+Amount: $2000
+Merchant: Electronics Store
+Location: Tokyo, Japan
+Time: 09:15""",
+            "expected": "FRAUD DETECTED - card will be blocked, creating long-term memory fact",
+        },
+        {
+            "name": "Alice Chen - Initial Fraud (Card Blocked)",
+            "actor_id": user_ids["alice"]["actor_id"],
+            "session_id": generate_session_id(),  # New session
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["alice"]["user_id"]}
+Amount: $3500
+Merchant: Jewelry Store
+Location: Sydney, Australia
+Time: 10:30""",
+            "expected": "FRAUD DETECTED - card will be blocked, creating long-term memory fact",
+        },
+    ]
+
+    phase1_results = run_scenarios(agent_runtime_arn, phase1_scenarios)
+
+    # Wait for memory extraction to process
+    print("\n" + "=" * 70)
+    print("WAITING FOR LONG-TERM MEMORY EXTRACTION...")
+    print("The semantic strategy needs time to process conversations into facts.")
+    print("Waiting 30 seconds...")
+    print("=" * 70)
+    time.sleep(30)
+
+    # Phase 2: New sessions - should retrieve long-term memory facts
+    print("\n" + "=" * 70)
+    print("PHASE 2: NEW SESSIONS - LONG-TERM MEMORY RETRIEVAL")
+    print("These are COMPLETELY NEW sessions. The agent should remember")
+    print("fraud-related facts about users from Phase 1.")
+    print("=" * 70)
+
+    phase2_scenarios = [
+        {
+            "name": "John Doe - NEW SESSION (Long-term Memory Test)",
+            "actor_id": user_ids["john"]["actor_id"],
+            "session_id": generate_session_id(),  # DIFFERENT session
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["john"]["user_id"]}
+Amount: $800
+Merchant: Online Store
+Location: Paris, France
+Time: 14:00""",
+            "expected": "CARD ALREADY BLOCKED - should recall from LONG-TERM MEMORY that card was blocked",
+        },
+        {
+            "name": "Alice Chen - NEW SESSION (Long-term Memory Test)",
+            "actor_id": user_ids["alice"]["actor_id"],
+            "session_id": generate_session_id(),  # DIFFERENT session
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["alice"]["user_id"]}
+Amount: $1200
+Merchant: Department Store
+Location: Singapore
+Time: 16:00""",
+            "expected": "CARD ALREADY BLOCKED - should recall from LONG-TERM MEMORY that card was blocked",
+        },
+        {
+            "name": "Jane Smith - NEW SESSION (No Long-term Memory)",
+            "actor_id": user_ids["jane"]["actor_id"],
+            "session_id": generate_session_id(),  # New session
+            "prompt": f"""ALERT: New Transaction Attempt
+User ID: {user_ids["jane"]["user_id"]}
+Amount: $200
+Merchant: Grocery Store
+Location: New York, USA
+Time: 18:00""",
+            "expected": "NO FRAUD - Jane has no fraud history in long-term memory",
+        },
+    ]
+
+    phase2_results = run_scenarios(agent_runtime_arn, phase2_scenarios)
+
+    # Summary
+    print("\n" + "=" * 70)
+    print("LONG-TERM MEMORY DEMO SUMMARY")
+    print("=" * 70)
+    print("\nPHASE 1 - Initial Fraud Detection:")
+    for result in phase1_results:
+        status_icon = "OK" if result["status"] == "SUCCESS" else "FAIL"
+        print(f"  [{status_icon}] {result['scenario']}")
+
+    print("\nPHASE 2 - Long-term Memory Retrieval:")
+    for result in phase2_results:
+        status_icon = "OK" if result["status"] == "SUCCESS" else "FAIL"
+        long_term_facts = result.get("response", {}).get("output", {}).get("long_term_facts_retrieved", 0)
+        print(f"  [{status_icon}] {result['scenario']} (Long-term facts: {long_term_facts})")
+
+    return {"phase1": phase1_results, "phase2": phase2_results}
+
+
+def run_scenarios(agent_runtime_arn: str, scenarios: list) -> list:
+    """Run a list of scenarios and return results."""
     results = []
     for i, scenario in enumerate(scenarios, 1):
         print(f"\n{'=' * 70}")
         print(f"SCENARIO {i}: {scenario['name']}")
         print(f"Expected: {scenario['expected']}")
         print(f"Actor ID: {scenario['actor_id']}")
-        print(f"Session ID: {scenario['session_id']}")
+        print(f"Session ID: {scenario['session_id'][:40]}...")
         print("-" * 70)
         print(f"Prompt:\n{scenario['prompt']}")
         print("-" * 70)
@@ -148,16 +325,8 @@ Time: 19:00""",
 
         # Brief pause between scenarios
         if i < len(scenarios):
-            print("\nWaiting 2 seconds before next scenario...")
-            time.sleep(2)
-
-    # Summary
-    print("\n" + "=" * 70)
-    print("DEMO SUMMARY")
-    print("=" * 70)
-    for result in results:
-        status_icon = "OK" if result["status"] == "SUCCESS" else "FAIL"
-        print(f"[{status_icon}] {result['scenario']}")
+            print("\nWaiting 3 seconds before next scenario...")
+            time.sleep(3)
 
     return results
 
@@ -167,11 +336,15 @@ def main():
         print("Usage: python invoke_agent.py <agent_runtime_arn> [mode]")
         print("")
         print("Modes:")
-        print("  demo    - Run comprehensive demo with multiple users (default)")
-        print("  single  - Run single fraud alert (original behavior)")
+        print("  demo           - Short-term memory demo (same session) - default")
+        print("  longterm       - Long-term memory demo (cross-session, fixed user IDs)")
+        print("  longterm-fresh - Long-term memory demo with FRESH user IDs (recommended for live demos)")
+        print("  single         - Run single fraud alert")
         print("")
         print("Examples:")
         print("  python invoke_agent.py arn:aws:... demo")
+        print("  python invoke_agent.py arn:aws:... longterm")
+        print("  python invoke_agent.py arn:aws:... longterm-fresh  # Best for live demos!")
         print("  python invoke_agent.py arn:aws:... single")
         sys.exit(1)
 
@@ -180,6 +353,10 @@ def main():
 
     if mode == "demo":
         run_demo_scenario(agent_runtime_arn)
+    elif mode == "longterm":
+        run_longterm_demo(agent_runtime_arn, fresh=False)
+    elif mode == "longterm-fresh":
+        run_longterm_demo(agent_runtime_arn, fresh=True)
     else:
         # Single fraud alert (original behavior)
         default_prompt = """ALERT: New Transaction Attempt
