@@ -10,4 +10,5 @@ COPY agent.py tools.py ./
 
 EXPOSE 8080
 
-CMD ["uv", "run", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]
+# Use OpenTelemetry auto-instrumentation for AWS X-Ray tracing
+CMD ["uv", "run", "opentelemetry-instrument", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]

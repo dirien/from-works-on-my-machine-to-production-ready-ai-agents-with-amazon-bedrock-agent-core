@@ -874,12 +874,120 @@ gateway_log_group = cloudwatch.LogGroup(
     opts=pulumi.ResourceOptions(depends_on=[agentcore_gateway]),
 )
 
+# Create delivery source for Gateway application logs
+gateway_logs_delivery_source = cloudwatch.LogDeliverySource(
+    "gateway-logs-delivery-source",
+    name="fraud-gateway-logs-src",
+    log_type="APPLICATION_LOGS",
+    resource_arn=agentcore_gateway.gateway_arn,
+    opts=pulumi.ResourceOptions(depends_on=[agentcore_gateway, gateway_log_group]),
+)
+
+# Create delivery destination for Gateway logs
+gateway_logs_delivery_destination = cloudwatch.LogDeliveryDestination(
+    "gateway-logs-delivery-destination",
+    name="fraud-gateway-logs-dest",
+    delivery_destination_configuration=cloudwatch.LogDeliveryDestinationDeliveryDestinationConfigurationArgs(
+        destination_resource_arn=gateway_log_group.arn,
+    ),
+    opts=pulumi.ResourceOptions(depends_on=[gateway_log_group]),
+)
+
+# Create the Gateway log delivery
+gateway_logs_delivery = cloudwatch.LogDelivery(
+    "gateway-logs-delivery",
+    delivery_source_name=gateway_logs_delivery_source.name,
+    delivery_destination_arn=gateway_logs_delivery_destination.arn,
+    opts=pulumi.ResourceOptions(depends_on=[gateway_logs_delivery_source, gateway_logs_delivery_destination]),
+)
+
+# Create delivery source for Gateway traces
+gateway_traces_delivery_source = cloudwatch.LogDeliverySource(
+    "gateway-traces-delivery-source",
+    name="fraud-gateway-traces-src",
+    log_type="TRACES",
+    resource_arn=agentcore_gateway.gateway_arn,
+    opts=pulumi.ResourceOptions(depends_on=[agentcore_gateway]),
+)
+
+# Create delivery destination for Gateway X-Ray traces
+gateway_traces_delivery_destination = cloudwatch.LogDeliveryDestination(
+    "gateway-traces-delivery-destination",
+    name="fraud-gateway-traces-dest",
+    delivery_destination_type="XRAY",
+    opts=pulumi.ResourceOptions(depends_on=[agentcore_gateway]),
+)
+
+# Create the Gateway trace delivery to X-Ray
+gateway_traces_delivery = cloudwatch.LogDelivery(
+    "gateway-traces-delivery",
+    delivery_source_name=gateway_traces_delivery_source.name,
+    delivery_destination_arn=gateway_traces_delivery_destination.arn,
+    opts=pulumi.ResourceOptions(depends_on=[gateway_traces_delivery_source, gateway_traces_delivery_destination]),
+)
+
+# ----------------------------------------------------------------------------
+# MCP Server Runtime Observability Configuration
+# ----------------------------------------------------------------------------
+
 # Create CloudWatch Log Group for MCP Server Runtime
 mcp_server_log_group = cloudwatch.LogGroup(
     "mcp-server-log-group",
     name=pulumi.Output.concat("/aws/vendedlogs/bedrock-agentcore/mcp-server/", mcp_server_runtime.agent_runtime_id),
     retention_in_days=30,
     opts=pulumi.ResourceOptions(depends_on=[mcp_server_runtime]),
+)
+
+# Create delivery source for MCP Server application logs
+mcp_server_logs_delivery_source = cloudwatch.LogDeliverySource(
+    "mcp-server-logs-delivery-source",
+    name="fraud-mcp-server-logs-src",
+    log_type="APPLICATION_LOGS",
+    resource_arn=mcp_server_runtime.agent_runtime_arn,
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_runtime, mcp_server_log_group]),
+)
+
+# Create delivery destination for MCP Server logs
+mcp_server_logs_delivery_destination = cloudwatch.LogDeliveryDestination(
+    "mcp-server-logs-delivery-destination",
+    name="fraud-mcp-server-logs-dest",
+    delivery_destination_configuration=cloudwatch.LogDeliveryDestinationDeliveryDestinationConfigurationArgs(
+        destination_resource_arn=mcp_server_log_group.arn,
+    ),
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_log_group]),
+)
+
+# Create the MCP Server log delivery
+mcp_server_logs_delivery = cloudwatch.LogDelivery(
+    "mcp-server-logs-delivery",
+    delivery_source_name=mcp_server_logs_delivery_source.name,
+    delivery_destination_arn=mcp_server_logs_delivery_destination.arn,
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_logs_delivery_source, mcp_server_logs_delivery_destination]),
+)
+
+# Create delivery source for MCP Server traces
+mcp_server_traces_delivery_source = cloudwatch.LogDeliverySource(
+    "mcp-server-traces-delivery-source",
+    name="fraud-mcp-server-traces-src",
+    log_type="TRACES",
+    resource_arn=mcp_server_runtime.agent_runtime_arn,
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_runtime]),
+)
+
+# Create delivery destination for MCP Server X-Ray traces
+mcp_server_traces_delivery_destination = cloudwatch.LogDeliveryDestination(
+    "mcp-server-traces-delivery-destination",
+    name="fraud-mcp-server-traces-dest",
+    delivery_destination_type="XRAY",
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_runtime]),
+)
+
+# Create the MCP Server trace delivery to X-Ray
+mcp_server_traces_delivery = cloudwatch.LogDelivery(
+    "mcp-server-traces-delivery",
+    delivery_source_name=mcp_server_traces_delivery_source.name,
+    delivery_destination_arn=mcp_server_traces_delivery_destination.arn,
+    opts=pulumi.ResourceOptions(depends_on=[mcp_server_traces_delivery_source, mcp_server_traces_delivery_destination]),
 )
 
 # Export the guardrail ID and version for use in the agent

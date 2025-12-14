@@ -110,7 +110,8 @@ This deploys everything in the basic deployment plus:
 
 **Observability:**
 - **CloudWatch Logs**: Application logs for agent, memory, gateway, and MCP server
-- **X-Ray Traces**: Distributed tracing for request flow
+- **X-Ray Traces**: Distributed tracing for request flow across all components
+- **OpenTelemetry**: Auto-instrumentation via AWS Distro for OpenTelemetry (ADOT)
 
 ## Testing the Deployed Agent
 
@@ -118,15 +119,17 @@ This deploys everything in the basic deployment plus:
 
 ```bash
 cd basic-bedrock-deployment
-./test.sh
+./test.sh          # Automatically selects stack and fetches ARN
+./test.sh --help   # Show usage
 ```
 
 ### Advanced Demo (Short-term Memory - Same Session)
 
 ```bash
 cd advanced-bedrock-deployment
-uv sync
-uv run python invoke_agent.py <agent_runtime_arn> demo
+./test.sh              # Run default 'demo' mode (auto-fetches ARN)
+./test.sh demo         # Explicit short-term memory demo
+./test.sh --help       # Show all available demo modes
 ```
 
 The short-term memory demo runs 5 scenarios within the SAME session:
@@ -140,8 +143,8 @@ The short-term memory demo runs 5 scenarios within the SAME session:
 
 ```bash
 cd advanced-bedrock-deployment
-uv sync
-uv run python invoke_agent.py <agent_runtime_arn> longterm
+./test.sh longterm         # Long-term memory demo
+./test.sh longterm-fresh   # Long-term memory with fresh IDs (recommended)
 ```
 
 The long-term memory demo runs in 2 phases with DIFFERENT sessions:
@@ -161,8 +164,8 @@ The long-term memory demo runs in 2 phases with DIFFERENT sessions:
 
 ```bash
 cd advanced-bedrock-deployment
-uv sync
-uv run python invoke_agent.py <agent_runtime_arn> gateway
+./test.sh gateway         # MCP Gateway demo
+./test.sh gateway-fresh   # MCP Gateway with fresh IDs (recommended)
 ```
 
 The MCP Gateway demo runs 6 diverse fraud scenarios using both local tools and MCP Gateway tools:
@@ -177,11 +180,9 @@ The MCP Gateway demo runs 6 diverse fraud scenarios using both local tools and M
 ### Demo Modes with Fresh IDs (Recommended for Live Demos)
 
 ```bash
-# Long-term memory with fresh IDs
-uv run python invoke_agent.py <agent_runtime_arn> longterm-fresh
-
-# MCP Gateway with fresh IDs
-uv run python invoke_agent.py <agent_runtime_arn> gateway-fresh
+cd advanced-bedrock-deployment
+./test.sh longterm-fresh   # Long-term memory with fresh IDs
+./test.sh gateway-fresh    # MCP Gateway with fresh IDs
 ```
 
 **Why use fresh mode?**
@@ -205,7 +206,9 @@ uv run python invoke_agent.py <agent_runtime_arn> gateway-fresh
   - OAuth2 credential provider for outbound auth
   - Semantic tool search for intelligent tool discovery
 - **Amazon Bedrock Guardrails**: Content filtering and topic enforcement
-- **Amazon CloudWatch**: Application logs and X-Ray traces for observability
+- **Amazon CloudWatch**: Application logs for observability
+- **AWS X-Ray**: Distributed tracing for request flow visualization
+- **AWS Distro for OpenTelemetry (ADOT)**: Auto-instrumentation for agent tracing
 - **Amazon Cognito**: OAuth2/JWT authentication for Gateway
 - **Model Context Protocol (MCP)**: Standard protocol for tool integration
 - **FastMCP**: Python framework for building MCP servers
@@ -242,11 +245,11 @@ The fraud agent uses two types of tools:
 
 ### Advanced Production Deployment (Memory & MCP Gateway)
 - `cd advanced-bedrock-deployment/infra && uv run pulumi up` - Deploy all infrastructure
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> demo` - Short-term memory demo
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm` - Long-term memory demo
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> longterm-fresh` - Long-term memory (fresh IDs)
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> gateway` - MCP Gateway demo
-- `cd advanced-bedrock-deployment && uv run python invoke_agent.py <arn> gateway-fresh` - MCP Gateway (fresh IDs, recommended)
+- `cd advanced-bedrock-deployment && ./test.sh` - Short-term memory demo (auto-fetches ARN)
+- `cd advanced-bedrock-deployment && ./test.sh longterm` - Long-term memory demo
+- `cd advanced-bedrock-deployment && ./test.sh longterm-fresh` - Long-term memory (fresh IDs)
+- `cd advanced-bedrock-deployment && ./test.sh gateway` - MCP Gateway demo
+- `cd advanced-bedrock-deployment && ./test.sh gateway-fresh` - MCP Gateway (fresh IDs, recommended)
 - `cd advanced-bedrock-deployment/infra && uv run pulumi destroy` - Tear down infrastructure
 
 ## Pulumi Stack Outputs
